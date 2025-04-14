@@ -14,28 +14,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libsm6 \
     libxext6 \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies (split into parts to avoid timeout)
+COPY requirements.txt requirements-minimal.txt requirements-rest.txt ./
+
+# Install minimal requirements first
+RUN pip install --no-cache-dir -r requirements-minimal.txt
+
+# Install torch separately with extended timeout
+RUN pip install --no-cache-dir torch --timeout 600
+
+# Install the remaining requirements
+RUN pip install --no-cache-dir -r requirements-rest.txt
 
 # Install spaCy model
 RUN python -m spacy download en_core_web_sm
 
-# Copy application code
+# Copy all application code
 COPY . .
 
-# Create directories for models
-RUN mkdir -p models
+# Create models directory
+RUN mkdir -p /app/models
 
-# Run training script to generate models
-RUN python train.py
-# Create directories for models
-RUN mkdir -p models
-
-# Copy your pre-trained models during image build
+# NOTE: Better to train models outside Docker and copy them instead of training during build
+# COPY pre-trained models (do this only if they already exist)
 COPY models/* /app/models/
 
 # Set environment variables
@@ -45,5 +48,5 @@ ENV PYTHONUNBUFFERED=1
 # Expose port
 EXPOSE 8080
 
-# Use gunicorn for production
-CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 0 app:app
+# Run using Gunicorn with a reasonable timeout (e.g., 300s)
+CMD ["gunicorn", "--bind", ":8080", "--workers", "1", "--threads", "8", "--timeout", "300", "app:app"]
