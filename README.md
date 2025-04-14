@@ -68,12 +68,12 @@ Preload models to make subsequent requests faster.
 
 1. Build the Docker image:
    ```
-   docker build -t pdf-analysis-api .
+   docker build -t jeevan-api .
    ```
 
 2. Run the container locally:
    ```
-   docker run -p 8080:8080 pdf-analysis-api
+   docker run -p 8080:8080 jeevan-api
    ```
 
 3. Test the API:
@@ -85,12 +85,12 @@ Preload models to make subsequent requests faster.
 
 1. Tag your Docker image for Google Container Registry:
    ```
-   docker tag pdf-analysis-api gcr.io/[PROJECT-ID]/pdf-analysis-api
+   docker tag jeevan-api gcr.io/[PROJECT-ID]/jeevan-api
    ```
 
 2. Push the image:
    ```
-   docker push gcr.io/[PROJECT-ID]/pdf-analysis-api
+   docker push gcr.io/[PROJECT-ID]/jeevan-api
    ```
 
 3. Deploy to Cloud Run
