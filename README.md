@@ -33,7 +33,7 @@ Analyze PDF documents or images.
   "insights_summary": "Document contains 25 named entities including John Smith, New York, 2023. Key topics focus on financial reporting, quarterly results, market analysis.",
   "insights_details": {
     "spacy": {
-      "entities": {"John Smith": "PERSON", "New York": "GPE"},
+      "entities": {"Rajan Singh": "PERSON", "Siwan": "Bihar"},
       "key_phrases": ["financial report", "quarterly results"]
     },
     "topics": [["financial", "report", "quarterly"], ["market", "analysis", "stock"]]
