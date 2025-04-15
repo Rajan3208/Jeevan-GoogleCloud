@@ -16,30 +16,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies (split into parts to avoid timeout)
-COPY requirements.txt requirements-minimal.txt requirements-rest.txt ./
+# Copy requirements file
+COPY requirements.txt .
 
-# Install minimal requirements first
-RUN pip install --no-cache-dir -r requirements-minimal.txt
+# Install tf-keras for transformers compatibility
+RUN pip install --no-cache-dir pip --upgrade && \
+    pip install --no-cache-dir tf-keras
 
-# Install torch separately with extended timeout
-RUN pip install --no-cache-dir torch --timeout 600
-
-# Install the remaining requirements
-RUN pip install --no-cache-dir -r requirements-rest.txt
+# Install Python dependencies with extended timeout
+RUN pip install --no-cache-dir -r requirements.txt --timeout 600
 
 # Install spaCy model
 RUN python -m spacy download en_core_web_sm
 
-# Copy all application code
-COPY . .
-
 # Create models directory
 RUN mkdir -p /app/models
 
-# NOTE: Better to train models outside Docker and copy them instead of training during build
-# COPY pre-trained models (do this only if they already exist)
-COPY models/* /app/models/
+# Copy the models directory first (to leverage Docker layer caching for large files)
+COPY models/ /app/models/
+
+# Install tf-keras for compatibility
+RUN pip install --no-cache-dir tf-keras
+
+# Copy the rest of the application code
+COPY . .
 
 # Set environment variables
 ENV PORT=8080
@@ -48,5 +48,5 @@ ENV PYTHONUNBUFFERED=1
 # Expose port
 EXPOSE 8080
 
-# Run using Gunicorn with a reasonable timeout (e.g., 300s)
+# Run using Gunicorn with a reasonable timeout
 CMD ["gunicorn", "--bind", ":8080", "--workers", "1", "--threads", "8", "--timeout", "300", "app:app"]
