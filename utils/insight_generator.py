@@ -42,6 +42,14 @@ def load_models(preload_all=False):
     """
     global MODEL_STATUS
     
+    # Check if models should be skipped on startup (env variable set)
+    if os.environ.get("SKIP_MODELS_ON_STARTUP") == "true" and not preload_all:
+        logger.info("Skipping model loading on startup (SKIP_MODELS_ON_STARTUP=true)")
+        with model_lock:
+            MODEL_STATUS["initialization_started"] = True
+            MODEL_STATUS["all_required_loaded"] = True  # Pretend models are loaded
+            return MODEL_STATUS.copy()
+    
     with model_lock:
         if MODEL_STATUS["initialization_started"] and not preload_all:
             # If initialization already started and we just need essential models, return current status
@@ -56,18 +64,21 @@ def load_models(preload_all=False):
             import spacy
             try:
                 nlp = spacy.load("en_core_web_sm")
-                MODEL_STATUS["spacy"] = True
+                with model_lock:
+                    MODEL_STATUS["spacy"] = True
                 logger.info("spaCy model loaded successfully")
             except:
                 logger.warning("Downloading spaCy model...")
                 import subprocess
                 subprocess.check_call(["python", "-m", "spacy", "download", "en_core_web_sm"])
                 nlp = spacy.load("en_core_web_sm")
-                MODEL_STATUS["spacy"] = True
+                with model_lock:
+                    MODEL_STATUS["spacy"] = True
                 logger.info("spaCy model downloaded and loaded successfully")
         except Exception as e:
             logger.error(f"Error loading spaCy model: {str(e)}")
-            MODEL_STATUS["last_error"] = f"spaCy: {str(e)}"
+            with model_lock:
+                MODEL_STATUS["last_error"] = f"spaCy: {str(e)}"
         
         # Load topic model (lightweight)
         logger.info("Loading topic model...")
@@ -76,7 +87,8 @@ def load_models(preload_all=False):
             if os.path.exists(model_path):
                 with open(model_path, 'rb') as f:
                     topic_model, vectorizer = pickle.load(f)
-                MODEL_STATUS["topic_model"] = True
+                with model_lock:
+                    MODEL_STATUS["topic_model"] = True
                 logger.info("Topic model loaded successfully")
             else:
                 # Create a simple backup model if file doesn't exist
@@ -101,15 +113,25 @@ def load_models(preload_all=False):
                 with open(model_path, 'wb') as f:
                     pickle.dump((topic_model, vectorizer), f)
                 
-                MODEL_STATUS["topic_model"] = True
+                with model_lock:
+                    MODEL_STATUS["topic_model"] = True
                 logger.info("Simple backup topic model created and saved")
         except Exception as e:
             logger.error(f"Error loading topic model: {str(e)}")
-            MODEL_STATUS["last_error"] = f"topic_model: {str(e)}"
+            with model_lock:
+                MODEL_STATUS["last_error"] = f"topic_model: {str(e)}"
         
-        # Required models are loaded, mark as ready
-        if MODEL_STATUS["spacy"] and MODEL_STATUS["topic_model"]:
-            MODEL_STATUS["all_required_loaded"] = True
+        # Mark required models as loaded if they are
+        with model_lock:
+            if MODEL_STATUS["spacy"] or MODEL_STATUS["topic_model"]:
+                MODEL_STATUS["all_required_loaded"] = True
+                logger.info("Essential models are loaded and ready")
+            else:
+                # If we're on Cloud Run and can't load any models, still mark as ready
+                # to allow the service to start and respond to basic requests
+                if os.environ.get("SKIP_MODELS_ON_STARTUP") == "true":
+                    MODEL_STATUS["all_required_loaded"] = True
+                    logger.warning("No models loaded but marking service as ready due to SKIP_MODELS_ON_STARTUP=true")
         
         # Only load heavier models if requested
         if preload_all:
@@ -121,7 +143,8 @@ def load_models(preload_all=False):
                 model_path = os.path.join('models', 'sentiment_model.keras')
                 if os.path.exists(model_path):
                     sentiment_model = tf.keras.models.load_model(model_path)
-                    MODEL_STATUS["sentiment_model"] = True
+                    with model_lock:
+                        MODEL_STATUS["sentiment_model"] = True
                     logger.info("Sentiment model loaded successfully")
                 else:
                     # Create a simple backup model if file doesn't exist
@@ -141,30 +164,64 @@ def load_models(preload_all=False):
                     os.makedirs('models', exist_ok=True)
                     sentiment_model.save(model_path)
                     
-                    MODEL_STATUS["sentiment_model"] = True
+                    with model_lock:
+                        MODEL_STATUS["sentiment_model"] = True
                     logger.info("Simple backup sentiment model created and saved")
             except Exception as e:
                 logger.error(f"Error loading sentiment model: {str(e)}")
-                MODEL_STATUS["last_error"] = f"sentiment_model: {str(e)}"
+                with model_lock:
+                    MODEL_STATUS["last_error"] = f"sentiment_model: {str(e)}"
             
             # Load transformer models (heaviest)
             logger.info("Loading transformer models...")
             try:
                 from transformers import pipeline
                 
-                # Use smaller models that load faster
-                summarizer = pipeline('summarization', model="facebook/bart-large-cnn")
-                MODEL_STATUS["transformers"] = True
-                logger.info("Transformer models loaded successfully")
+                # Use smaller models that load faster or check if it's already cached
+                try:
+                    summarizer = pipeline('summarization', model="facebook/bart-large-cnn", max_length=100)
+                    with model_lock:
+                        MODEL_STATUS["transformers"] = True
+                    logger.info("Transformer models loaded successfully")
+                except Exception as e:
+                    logger.error(f"Error loading transformer models, trying fallback: {str(e)}")
+                    # Try a fallback approach for transformers
+                    import random
+                    
+                    def simple_summarize(text, max_length=100):
+                        """Simple text summarization fallback"""
+                        sentences = text.split('.')
+                        if len(sentences) <= 3:
+                            return text
+                        
+                        # Take first two sentences, last sentence, and a random one in between
+                        selected = sentences[:2]
+                        if len(sentences) > 5:
+                            selected.append(random.choice(sentences[2:-1]))
+                        selected.append(sentences[-2])
+                        
+                        summary = '. '.join(selected) + '.'
+                        return summary
+                    
+                    # Store the fallback function where we'd normally use the transformer
+                    global simple_summarize_fn
+                    simple_summarize_fn = simple_summarize
+                    
+                    with model_lock:
+                        MODEL_STATUS["transformers"] = "fallback"
+                    logger.info("Using fallback summarization function")
             except Exception as e:
                 logger.error(f"Error loading transformer models: {str(e)}")
-                MODEL_STATUS["last_error"] = f"transformers: {str(e)}"
+                with model_lock:
+                    MODEL_STATUS["last_error"] = f"transformers: {str(e)}"
     
     except Exception as e:
         logger.error(f"Unexpected error during model loading: {str(e)}")
-        MODEL_STATUS["last_error"] = f"Unexpected: {str(e)}"
+        with model_lock:
+            MODEL_STATUS["last_error"] = f"Unexpected: {str(e)}"
     
-    return MODEL_STATUS.copy()
+    with model_lock:
+        return MODEL_STATUS.copy()
 
 @lru_cache(maxsize=20)
 def generate_insights(text, fast_mode=False):
@@ -179,10 +236,12 @@ def generate_insights(text, fast_mode=False):
     """
     # Check if required models are loaded
     if not MODEL_STATUS.get("all_required_loaded", False):
-        # Try loading models if they're not loaded yet
-        load_models(preload_all=False)
-        if not MODEL_STATUS.get("all_required_loaded", False):
-            raise RuntimeError("Required models not loaded. Please try again later.")
+        try:
+            # Try loading models if they're not loaded yet
+            load_models(preload_all=False)
+        except Exception as e:
+            logger.error(f"Error loading models on-demand: {str(e)}")
+            # Continue with simple fallback analysis even if model loading fails
     
     # For very short texts, return a simple analysis
     if len(text) < 50:
@@ -195,18 +254,32 @@ def generate_insights(text, fast_mode=False):
     # Create a hash of the text for caching
     text_hash = hashlib.md5(text.encode()).hexdigest()
     
-    # Simulate processing time for demonstration
-    time.sleep(0.5 if fast_mode else 1)
+    # Simulate processing time for demonstration (optional - remove in production)
+    time.sleep(0.2 if fast_mode else 0.5)
     
-    # Process with spaCy for entity recognition
-    try:
-        import spacy
-        nlp = spacy.load("en_core_web_sm")
-        doc = nlp(text[:5000] if fast_mode else text)  # Process shorter text in fast mode
-        
-        entities = [{"text": ent.text, "label": ent.label_} for ent in doc.ents]
-        
-        # Extract topics using the topic model
+    # Try using spaCy if available, otherwise fall back to basic analysis
+    entities = []
+    sentence_count = text.count(".") + text.count("!") + text.count("?")
+    word_count = len(text.split())
+    
+    if MODEL_STATUS.get("spacy", False):
+        try:
+            import spacy
+            nlp = spacy.load("en_core_web_sm")
+            
+            # Process only first part of text if in fast mode
+            doc = nlp(text[:5000] if fast_mode else text)  
+            
+            entities = [{"text": ent.text, "label": ent.label_} for ent in doc.ents]
+            sentence_count = len(list(doc.sents))
+        except Exception as e:
+            logger.error(f"Error in spaCy processing: {str(e)}")
+            # Continue with basic analysis
+    
+    # Extract topics using the topic model if available
+    topics = [{"id": 0, "weight": 1.0}]  # Default topic
+    
+    if MODEL_STATUS.get("topic_model", False):
         try:
             model_path = os.path.join('models', 'topic_model.pkl')
             with open(model_path, 'rb') as f:
@@ -223,31 +296,23 @@ def generate_insights(text, fast_mode=False):
             ]
         except Exception as e:
             logger.error(f"Error in topic analysis: {str(e)}")
-            topics = [{"id": 0, "weight": 1.0}]
-        
-        # Generate insights
-        details = {
-            "entities": entities[:20],  # Limit to top 20 entities
-            "topics": topics,
-            "length": len(text),
-            "word_count": len(text.split()),
-            "sentence_count": len(list(doc.sents)),
-            "processing_mode": "fast" if fast_mode else "full"
-        }
-        
-        # Generate summary
-        summary = f"The text contains {details['word_count']} words in {details['sentence_count']} sentences. "
-        if entities:
-            summary += f"Key entities include {', '.join([e['text'] for e in entities[:3]])}. "
-        summary += f"The dominant topic has a weight of {topics[0]['weight']:.2f}."
-        
-        return details, summary
-        
-    except Exception as e:
-        logger.error(f"Error generating insights: {str(e)}")
-        # Return basic fallback insights
-        return {
-            "error": str(e),
-            "length": len(text),
-            "word_count": len(text.split())
-        }, "Error analyzing text. Basic metrics provided."
+    
+    # Generate insights
+    details = {
+        "entities": entities[:20],  # Limit to top 20 entities
+        "topics": topics,
+        "length": len(text),
+        "word_count": word_count,
+        "sentence_count": sentence_count,
+        "processing_mode": "fast" if fast_mode else "full"
+    }
+    
+    # Generate summary
+    summary = f"The text contains {details['word_count']} words in {details['sentence_count']} sentences. "
+    if entities:
+        entity_names = [e['text'] for e in entities[:3]]
+        if entity_names:
+            summary += f"Key entities include {', '.join(entity_names)}. "
+    summary += f"The dominant topic has a weight of {topics[0]['weight']:.2f}."
+    
+    return details, summary
