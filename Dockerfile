@@ -11,6 +11,10 @@ ENV PYTHONMALLOC=malloc
 ENV PORT=8080
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV TRANSFORMERS_CACHE=/app/models/transformers_cache
+ENV SKIP_MODELS_ON_STARTUP=true
+
+# Add build caching to speed up rebuilds
+ARG BUILDKIT_INLINE_CACHE=1
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -24,34 +28,39 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements file
-COPY requirements.txt .
-
-# Install Python dependencies with extended timeout
-RUN pip install --no-cache-dir pip --upgrade && \
-    pip install --no-cache-dir -r requirements.txt --timeout 600
-
-# Install tf-keras for transformers compatibility
-RUN pip install --no-cache-dir tf-keras
-
-# Install spaCy model
-RUN python -m spacy download en_core_web_sm
+# Install essential packages first for faster startup
+COPY requirements-minimal.txt /app/
+RUN pip install --no-cache-dir -r requirements-minimal.txt
 
 # Create directories for models
-RUN mkdir -p /app/models/transformers_cache
+RUN mkdir -p /app/models/transformers_cache /app/utils
 
-# Copy the models directory first (to leverage Docker layer caching for large files)
-COPY models/ /app/models/
-
-# Copy utility modules
-COPY utils/ /app/utils/
+# Copy utility modules first
+COPY utils/__init__.py /app/utils/
+COPY utils/pdf_processor.py /app/utils/
+COPY utils/text_extraction.py /app/utils/
+COPY utils/insight_generator.py /app/utils/
 
 # Copy the startup script
 COPY startup.sh /app/
 RUN chmod +x /app/startup.sh
 
-# Copy the rest of the application code
-COPY *.py /app/
+# Copy application code
+COPY app.py /app/
+
+# Create placeholder models directory
+RUN mkdir -p /app/models
+RUN touch /app/models/.keep
+
+# Copy full requirements and install remaining dependencies
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt --timeout 600
+
+# Install spaCy model
+RUN python -m spacy download en_core_web_sm
+
+# Copy the models if they exist
+COPY models/ /app/models/
 
 # Expose port
 EXPOSE 8080
