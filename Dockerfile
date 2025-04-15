@@ -1,8 +1,8 @@
 # Use official Python image with slim version for smaller size
 FROM python:3.10-slim
 
-# Set working directory
-WORKDIR /app
+# Set working directory - no app subdirectory
+WORKDIR /
 
 # Set environment variables for better performance
 ENV PYTHONUNBUFFERED=1
@@ -10,7 +10,7 @@ ENV MALLOC_ARENA_MAX=2
 ENV PYTHONMALLOC=malloc
 ENV PORT=8080
 ENV PYTHONDONTWRITEBYTECODE=1
-ENV TRANSFORMERS_CACHE=/app/models/transformers_cache
+ENV TRANSFORMERS_CACHE=/models/transformers_cache
 ENV SKIP_MODELS_ON_STARTUP=true
 
 # Add build caching to speed up rebuilds
@@ -28,42 +28,38 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install essential packages first for faster startup
-COPY requirements.txt /app/
-RUN pip install --no-cache-dir -r requirements.txt
-
 # Create directories for models
-RUN mkdir -p /app/models/transformers_cache /app/utils
+RUN mkdir -p /models/transformers_cache /utils
 
-# Copy utility modules first
-COPY utils/__init__.py /app/utils/
-COPY utils/pdf_processor.py /app/utils/
-COPY utils/text_extraction.py /app/utils/
-COPY utils/insight_generator.py /app/utils/
+# Install essential packages
+COPY requirements.txt /
+RUN pip install --no-cache-dir -r requirements.txt --timeout 600
 
-# Copy the startup script
-COPY startup.sh /app/
-RUN chmod +x /app/startup.sh
+# Copy utility modules
+COPY utils/__init__.py /utils/
+COPY utils/pdf_processor.py /utils/
+COPY utils/text_extraction.py /utils/
+COPY utils/insight_generator.py /utils/
+
+# Copy the startup script to root directory
+COPY startup.sh /
+RUN chmod +x /startup.sh
 
 # Copy application code
-COPY app.py /app/
+COPY app.py /
 
 # Create placeholder models directory
-RUN mkdir -p /app/models
-RUN touch /app/models/.keep
-
-# Copy full requirements and install remaining dependencies
-COPY requirements.txt /app/
-RUN pip install --no-cache-dir -r requirements.txt --timeout 600
+RUN mkdir -p /models
+RUN touch /models/.keep
 
 # Install spaCy model
 RUN python -m spacy download en_core_web_sm
 
 # Copy the models if they exist
-COPY models/ /app/models/
+COPY models/ /models/
 
 # Expose port
 EXPOSE 8080
 
-# Use the startup script
-CMD ["./startup.sh"]
+# Use the startup script with absolute path
+CMD ["/startup.sh"]
