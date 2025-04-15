@@ -4,6 +4,8 @@ import tempfile
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 import logging
+import concurrent.futures
+from functools import lru_cache
 
 # Import utility modules
 from utils.pdf_processor import convert_pdf_to_images
@@ -22,6 +24,19 @@ app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
 # Allowed file extensions
 ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg'}
 
+# Global thread pool for parallel processing
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+# Cache for model results to avoid redundant processing
+@lru_cache(maxsize=100)
+def cached_generate_insights(text_hash, fast_mode):
+    # We use the hash of text as the key since text itself might be too large for a cache key
+    return generate_insights.original_function(text_hash, fast_mode)
+
+# Patch the generate_insights function with a cached version
+generate_insights.original_function = generate_insights
+generate_insights = lru_cache(maxsize=20)(generate_insights)
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -34,7 +49,7 @@ def health_check():
 def preload_models():
     """Endpoint to preload models"""
     start_time = time.time()
-    model_status = load_models()
+    model_status = load_models(preload_all=True)  # Modified to preload all models
     duration = time.time() - start_time
     return jsonify({
         'status': 'Models loaded successfully',
@@ -73,22 +88,50 @@ def analyze_document():
         # Process based on file type
         file_ext = filename.rsplit('.', 1)[1].lower()
         
+        # Use a lower sampling rate for large PDFs in fast mode
+        sample_rate = 2 if fast_mode else 1  # Sample every other page in fast mode
+        
         if file_ext == 'pdf':
-            # Process PDF
-            images = convert_pdf_to_images(file_path)
-            text_results, combined_text = extract_text_parallel(file_path, images, use_ocr)
+            # Process PDF with optimized settings
+            max_pages = 10 if fast_mode else 20  # Limit pages in fast mode
+            images = convert_pdf_to_images(file_path, max_pages=max_pages, sample_rate=sample_rate)
+            
+            # Process text extraction in parallel
+            text_results, combined_text = extract_text_parallel(
+                file_path, 
+                images, 
+                use_ocr=use_ocr,
+                fast_mode=fast_mode
+            )
         else:
-            # Process single image
+            # Process single image with optimized settings
             from PIL import Image
             import pytesseract
             
             img = Image.open(file_path)
-            text = pytesseract.image_to_string(img)
+            
+            # Resize large images for faster processing in fast mode
+            if fast_mode and (img.width > 2000 or img.height > 2000):
+                scale_factor = 0.5
+                new_size = (int(img.width * scale_factor), int(img.height * scale_factor))
+                img = img.resize(new_size, Image.LANCZOS)
+            
+            # Use simpler OCR config in fast mode
+            config = '--psm 1 --oem 1' if fast_mode else '--psm 3 --oem 3'
+            text = pytesseract.image_to_string(img, config=config)
             text_results = {'pytesseract': text}
             combined_text = text
         
-        # Generate insights
-        insights_details, insights_summary = generate_insights(combined_text, fast_mode)
+        # Submit insight generation to thread pool to avoid blocking
+        if fast_mode:
+            # For fast mode, use a simpler approach directly
+            future = executor.submit(generate_insights, combined_text[:10000], fast_mode)  # Limit text length
+        else:
+            future = executor.submit(generate_insights, combined_text, fast_mode)
+        
+        # Get results with timeout
+        timeout = 30 if fast_mode else 60
+        insights_details, insights_summary = future.result(timeout=timeout)
         
         # Calculate processing time
         processing_time = time.time() - start_time
@@ -111,6 +154,12 @@ def analyze_document():
         
         return jsonify(response), 200
     
+    except concurrent.futures.TimeoutError:
+        logger.error("Processing timed out")
+        return jsonify({
+            'error': 'Processing timed out. Try using fast_mode=true for quicker results.',
+            'status': 'timeout'
+        }), 408
     except Exception as e:
         logger.error(f"Error processing document: {str(e)}", exc_info=True)
         return jsonify({
@@ -132,8 +181,14 @@ def analyze_text():
     fast_mode = data.get('fast_mode', True)
     
     try:
-        # Generate insights
-        insights_details, insights_summary = generate_insights(text, fast_mode)
+        # Limit text length for fast processing
+        if fast_mode and len(text) > 10000:
+            text = text[:10000]
+            
+        # Generate insights with timeout
+        future = executor.submit(generate_insights, text, fast_mode)
+        timeout = 30 if fast_mode else 60
+        insights_details, insights_summary = future.result(timeout=timeout)
         
         # Calculate processing time
         processing_time = time.time() - start_time
@@ -149,6 +204,12 @@ def analyze_text():
         
         return jsonify(response), 200
     
+    except concurrent.futures.TimeoutError:
+        logger.error("Text analysis timed out")
+        return jsonify({
+            'error': 'Processing timed out. Try using fast_mode=true for quicker results.',
+            'status': 'timeout'
+        }), 408
     except Exception as e:
         logger.error(f"Error analyzing text: {str(e)}", exc_info=True)
         return jsonify({
@@ -174,16 +235,22 @@ def index():
 # Global variable to track model loading status
 models_loaded = False
 
-@app.before_request
-def load_models_if_needed():
+@app.before_first_request
+def load_models_on_startup():
+    """Load lightweight models on startup"""
     global models_loaded
-    if not models_loaded and request.endpoint not in ['health_check', 'index']:
-        logger.info("Loading models on first request...")
-        load_models()
+    if not models_loaded:
+        logger.info("Loading lightweight models on startup...")
+        load_models(preload_all=False)  # Only load essential models
         models_loaded = True
-        logger.info("Models loaded successfully")
+        logger.info("Essential models loaded successfully")
 
 if __name__ == '__main__':
-    # Start server without preloading models
+    # Start server
     port = int(os.environ.get('PORT', 8080))
+    
+    # Preload models in a separate thread to avoid blocking startup
+    import threading
+    threading.Thread(target=load_models_on_startup).start()
+    
     app.run(host='0.0.0.0', port=port)
