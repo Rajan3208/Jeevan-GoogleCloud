@@ -171,11 +171,19 @@ def index():
         'documentation': 'See README.md for detailed usage instructions'
     }), 200
 
+# Global variable to track model loading status
+models_loaded = False
+
+@app.before_request
+def load_models_if_needed():
+    global models_loaded
+    if not models_loaded and request.endpoint not in ['health_check', 'index']:
+        logger.info("Loading models on first request...")
+        load_models()
+        models_loaded = True
+        logger.info("Models loaded successfully")
+
 if __name__ == '__main__':
-    # Preload models at startup
-    logger.info("Preloading models...")
-    load_models()
-    
-    # Start server
+    # Start server without preloading models
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
