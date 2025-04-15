@@ -30,7 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install essential packages first for faster startup
 COPY requirements-minimal.txt /app/
-RUN pip install --no-cache-dir -r requirements-minimal.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Create directories for models
 RUN mkdir -p /app/models/transformers_cache /app/utils
