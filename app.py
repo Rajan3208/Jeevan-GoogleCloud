@@ -1,7 +1,7 @@
 import os
 import time
 import tempfile
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, current_app
 from werkzeug.utils import secure_filename
 import logging
 import concurrent.futures
@@ -10,10 +10,11 @@ from functools import lru_cache
 # Import utility modules
 from utils.pdf_processor import convert_pdf_to_images
 from utils.text_extraction import extract_text_parallel
-from utils.insight_generator import generate_insights, load_models
+from utils.insight_generator import generate_insights, load_models, check_models_loaded
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, 
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Initialize Flask app
@@ -31,35 +32,62 @@ executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 @lru_cache(maxsize=100)
 def cached_generate_insights(text_hash, fast_mode):
     # We use the hash of text as the key since text itself might be too large for a cache key
-    return generate_insights.original_function(text_hash, fast_mode)
-
-# Patch the generate_insights function with a cached version
-generate_insights.original_function = generate_insights
-generate_insights = lru_cache(maxsize=20)(generate_insights)
+    return generate_insights(text_hash, fast_mode)
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Health check endpoint"""
-    return jsonify({'status': 'healthy'}), 200
+    """Health check endpoint with model status"""
+    models_status = check_models_loaded()
+    
+    if models_status.get("all_required_loaded", False):
+        return jsonify({
+            'status': 'healthy', 
+            'models': models_status
+        }), 200
+    else:
+        # Return 200 even if models aren't fully loaded to avoid container restarts
+        # Cloud Run will still serve traffic, but clients will know system is warming up
+        return jsonify({
+            'status': 'starting', 
+            'models': models_status,
+            'message': 'Service is starting up, models still loading'
+        }), 200
 
 @app.route('/load-models', methods=['GET'])
 def preload_models():
     """Endpoint to preload models"""
     start_time = time.time()
-    model_status = load_models(preload_all=True)  # Modified to preload all models
-    duration = time.time() - start_time
-    return jsonify({
-        'status': 'Models loaded successfully',
-        'model_status': model_status,
-        'duration_seconds': duration
-    }), 200
+    try:
+        model_status = load_models(preload_all=True)
+        duration = time.time() - start_time
+        return jsonify({
+            'status': 'Models loaded successfully',
+            'model_status': model_status,
+            'duration_seconds': duration
+        }), 200
+    except Exception as e:
+        logger.error(f"Error loading models: {str(e)}", exc_info=True)
+        return jsonify({
+            'status': 'error',
+            'error': str(e),
+            'duration_seconds': time.time() - start_time
+        }), 500
 
 @app.route('/analyze', methods=['POST'])
 def analyze_document():
     """Main endpoint to analyze PDF or image documents"""
+    # Check if models are loaded
+    models_status = check_models_loaded()
+    if not models_status.get("all_required_loaded", False):
+        return jsonify({
+            'error': 'Service is still initializing. Please try again in a few moments.',
+            'status': 'initializing',
+            'models': models_status
+        }), 503  # Service Unavailable
+        
     start_time = time.time()
     
     # Check if file is included in the request
@@ -170,6 +198,15 @@ def analyze_document():
 @app.route('/analyze-text', methods=['POST'])
 def analyze_text():
     """Endpoint to analyze raw text"""
+    # Check if models are loaded
+    models_status = check_models_loaded()
+    if not models_status.get("all_required_loaded", False):
+        return jsonify({
+            'error': 'Service is still initializing. Please try again in a few moments.',
+            'status': 'initializing',
+            'models': models_status
+        }), 503  # Service Unavailable
+        
     start_time = time.time()
     
     # Get text content from request
@@ -235,22 +272,33 @@ def index():
 # Global variable to track model loading status
 models_loaded = False
 
+# Initialize models during application startup
+def initialize_models():
+    """Load essential models during startup"""
+    global models_loaded
+    try:
+        logger.info("Loading essential models on startup...")
+        status = load_models(preload_all=False)
+        models_loaded = status.get("all_required_loaded", False)
+        logger.info(f"Essential models loaded successfully: {models_loaded}")
+        return status
+    except Exception as e:
+        logger.error(f"Error loading essential models: {str(e)}", exc_info=True)
+        return {"error": str(e), "all_required_loaded": False}
+
+# Register initialization function to run with app context
 @app.before_first_request
-def load_models_on_startup():
-    """Load lightweight models on startup"""
+def before_first_request():
+    """For compatibility with older Flask versions"""
     global models_loaded
     if not models_loaded:
-        logger.info("Loading lightweight models on startup...")
-        load_models(preload_all=False)  # Only load essential models
-        models_loaded = True
-        logger.info("Essential models loaded successfully")
+        initialize_models()
 
 if __name__ == '__main__':
     # Start server
     port = int(os.environ.get('PORT', 8080))
     
-    # Preload models in a separate thread to avoid blocking startup
-    import threading
-    threading.Thread(target=load_models_on_startup).start()
+    # Preload models
+    initialize_models()
     
     app.run(host='0.0.0.0', port=port)
