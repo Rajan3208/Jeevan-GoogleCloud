@@ -1,8 +1,6 @@
 import logging
 import concurrent.futures
-import pytesseract
-from PIL import Image
-import fitz  # PyMuPDF
+import os
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -18,6 +16,8 @@ def extract_text_from_pdf(pdf_path, page_range=None):
         str: Extracted text
     """
     try:
+        import fitz  # PyMuPDF
+        
         doc = fitz.open(pdf_path)
         
         # Determine page range
@@ -51,6 +51,8 @@ def extract_text_with_ocr(image, fast_mode=False):
         str: Extracted text
     """
     try:
+        import pytesseract
+        
         # Configure OCR settings based on mode
         if fast_mode:
             config = '--psm 1 --oem 1'  # Fast mode with automatic page segmentation
@@ -78,9 +80,11 @@ def extract_text_parallel(pdf_path, images, use_ocr=True, fast_mode=False):
     """
     results = {}
     
-    # Extract text directly from PDF (usually faster and better when text is available)
-    pdf_text = extract_text_from_pdf(pdf_path)
-    results['pdf_direct'] = pdf_text
+    # Try to extract text directly from PDF first (usually faster and better when text is available)
+    pdf_text = ""
+    if os.path.exists(pdf_path) and pdf_path.lower().endswith('.pdf'):
+        pdf_text = extract_text_from_pdf(pdf_path)
+        results['pdf_direct'] = pdf_text
     
     # If OCR is requested and there are images, extract text with OCR
     if use_ocr and images:
@@ -99,21 +103,3 @@ def extract_text_parallel(pdf_path, images, use_ocr=True, fast_mode=False):
             
             for future in concurrent.futures.as_completed(futures):
                 idx = futures[future]
-                try:
-                    ocr_text = future.result()
-                    ocr_results.append(ocr_text)
-                except Exception as e:
-                    logger.error(f"Error processing image {idx}: {str(e)}")
-        
-        # Combine OCR results
-        results['ocr'] = "\n\n".join(ocr_results)
-    
-    # Combine all text results, prioritizing PDF direct extraction if it has content
-    if pdf_text.strip() and len(pdf_text) > 100:
-        # If PDF direct extraction has reasonable content, use it as primary
-        combined_text = pdf_text
-    elif 'ocr' in results and results['ocr'].strip():
-        # Otherwise use OCR results if available
-        combined_text = results['ocr']
-    else:
-        # Fallback to whatever
