@@ -29,7 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install essential packages first for faster startup
-COPY requirements-minimal.txt /app/
+COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Create directories for models
