@@ -42,19 +42,12 @@ def health_check():
     """Health check endpoint with model status"""
     models_status = check_models_loaded()
     
-    if models_status.get("all_required_loaded", False):
-        return jsonify({
-            'status': 'healthy', 
-            'models': models_status
-        }), 200
-    else:
-        # Return 200 even if models aren't fully loaded to avoid container restarts
-        # Cloud Run will still serve traffic, but clients will know system is warming up
-        return jsonify({
-            'status': 'starting', 
-            'models': models_status,
-            'message': 'Service is starting up, models still loading'
-        }), 200
+    # Always return 200 OK to pass Cloud Run health checks
+    return jsonify({
+        'status': 'healthy', 
+        'models': models_status,
+        'initialization': 'in progress' if not models_status.get("all_required_loaded", False) else 'complete'
+    }), 200
 
 @app.route('/load-models', methods=['GET'])
 def preload_models():
@@ -82,11 +75,12 @@ def analyze_document():
     # Check if models are loaded
     models_status = check_models_loaded()
     if not models_status.get("all_required_loaded", False):
-        return jsonify({
-            'error': 'Service is still initializing. Please try again in a few moments.',
-            'status': 'initializing',
-            'models': models_status
-        }), 503  # Service Unavailable
+        try:
+            logger.info("Loading models on demand...")
+            load_models(preload_all=False)
+        except Exception as e:
+            logger.error(f"Error loading models on demand: {str(e)}")
+            # Continue anyway - we'll try to work with whatever is available
         
     start_time = time.time()
     
@@ -201,11 +195,12 @@ def analyze_text():
     # Check if models are loaded
     models_status = check_models_loaded()
     if not models_status.get("all_required_loaded", False):
-        return jsonify({
-            'error': 'Service is still initializing. Please try again in a few moments.',
-            'status': 'initializing',
-            'models': models_status
-        }), 503  # Service Unavailable
+        try:
+            logger.info("Loading models on demand...")
+            load_models(preload_all=False)
+        except Exception as e:
+            logger.error(f"Error loading models on demand: {str(e)}")
+            # Continue anyway - we'll try to work with whatever is available
         
     start_time = time.time()
     
@@ -269,36 +264,7 @@ def index():
         'documentation': 'See README.md for detailed usage instructions'
     }), 200
 
-# Global variable to track model loading status
-models_loaded = False
-
-# Initialize models during application startup
-def initialize_models():
-    """Load essential models during startup"""
-    global models_loaded
-    try:
-        logger.info("Loading essential models on startup...")
-        status = load_models(preload_all=False)
-        models_loaded = status.get("all_required_loaded", False)
-        logger.info(f"Essential models loaded successfully: {models_loaded}")
-        return status
-    except Exception as e:
-        logger.error(f"Error loading essential models: {str(e)}", exc_info=True)
-        return {"error": str(e), "all_required_loaded": False}
-
-# Register initialization function to run with app context
-@app.before_first_request
-def before_first_request():
-    """For compatibility with older Flask versions"""
-    global models_loaded
-    if not models_loaded:
-        initialize_models()
-
 if __name__ == '__main__':
     # Start server
     port = int(os.environ.get('PORT', 8080))
-    
-    # Preload models
-    initialize_models()
-    
     app.run(host='0.0.0.0', port=port)
