@@ -1,137 +1,119 @@
-from PIL import Image
-from io import BytesIO
-import os
-from tempfile import NamedTemporaryFile
-from PyPDF2 import PdfReader
+import logging
 import concurrent.futures
+import pytesseract
+from PIL import Image
+import fitz  # PyMuPDF
 
-# Import OCR libraries only when needed
-def import_ocr_libraries():
-    try:
-        import pytesseract
-        from easyocr import Reader
-        from langchain_community.document_loaders import UnstructuredImageLoader, UnstructuredFileLoader
-        return True
-    except ImportError:
-        print("Warning: Some OCR libraries are not available")
-        return False
+# Configure logging
+logger = logging.getLogger(__name__)
 
-def extract_text_with_pypdf(pdf_file):
-    """Extract text using PyPDF2"""
-    pdf_reader = PdfReader(pdf_file)
-    raw_text = ''
-    for i, page in enumerate(pdf_reader.pages):
-        text = page.extract_text()
-        if text:
-            raw_text += text
-    return raw_text
-
-def extract_text_with_pytesseract(list_dict_final_images):
-    """Extract text from images using PyTesseract"""
-    from pytesseract import image_to_string
+def extract_text_from_pdf(pdf_path, page_range=None):
+    """Extract text directly from PDF using PyMuPDF
     
-    image_list = [list(data.values())[0] for data in list_dict_final_images]
-    image_content = []
-
-    for index, image_bytes in enumerate(image_list):
-        image = Image.open(BytesIO(image_bytes))
-        raw_text = str(image_to_string(image))
-        image_content.append(raw_text)
-
-    return "\n".join(image_content)
-
-def extract_text_with_easyocr(list_dict_final_images):
-    """Extract text from images using EasyOCR"""
-    from easyocr import Reader
-    
-    language_reader = Reader(["en"])
-    image_list = [list(data.values())[0] for data in list_dict_final_images]
-    image_content = []
-
-    # Process images in smaller batches
-    batch_size = 3  # Process fewer images at once to reduce memory usage
-    
-    for i in range(0, len(image_list), batch_size):
-        batch = image_list[i:i+batch_size]
-        batch_content = []
+    Args:
+        pdf_path (str): Path to the PDF file
+        page_range (tuple): Start and end page numbers (0-indexed)
         
-        for image_bytes in batch:
-            image = Image.open(BytesIO(image_bytes))
-            raw_text = language_reader.readtext(image)
-            raw_text = "\n".join([res[1] for res in raw_text])
-            batch_content.append(raw_text)
-            
-        image_content.extend(batch_content)
+    Returns:
+        str: Extracted text
+    """
+    try:
+        doc = fitz.open(pdf_path)
+        
+        # Determine page range
+        start_page = 0
+        end_page = min(len(doc), 20)  # Limit to 20 pages
+        
+        if page_range:
+            start_page = max(0, page_range[0])
+            end_page = min(len(doc), page_range[1] + 1)
+        
+        # Extract text from pages
+        text = ""
+        for page_num in range(start_page, end_page):
+            page = doc.load_page(page_num)
+            text += page.get_text()
+        
+        doc.close()
+        return text
+    except Exception as e:
+        logger.error(f"Error extracting text from PDF: {str(e)}")
+        return ""
 
-    return "\n".join(image_content)
-
-def extract_text_with_langchain(pdf_file):
-    """Extract text using Langchain's UnstructuredFileLoader"""
-    from langchain_community.document_loaders import UnstructuredFileLoader
+def extract_text_with_ocr(image, fast_mode=False):
+    """Extract text from image using OCR
     
-    loader = UnstructuredFileLoader(pdf_file)
-    documents = loader.load()
-    pdf_pages_content = '\n'.join(doc.page_content for doc in documents)
-    return pdf_pages_content
+    Args:
+        image (PIL.Image): Image to process
+        fast_mode (bool): If True, use faster but less accurate settings
+        
+    Returns:
+        str: Extracted text
+    """
+    try:
+        # Configure OCR settings based on mode
+        if fast_mode:
+            config = '--psm 1 --oem 1'  # Fast mode with automatic page segmentation
+        else:
+            config = '--psm 3 --oem 3'  # More accurate with fully automatic page segmentation
+        
+        # Perform OCR
+        text = pytesseract.image_to_string(image, config=config)
+        return text
+    except Exception as e:
+        logger.error(f"Error extracting text with OCR: {str(e)}")
+        return ""
 
-def extract_text_with_langchain_image(list_dict_final_images):
-    """Extract text from images using Langchain's UnstructuredImageLoader"""
-    from langchain_community.document_loaders import UnstructuredImageLoader
+def extract_text_parallel(pdf_path, images, use_ocr=True, fast_mode=False):
+    """Extract text using multiple methods in parallel
     
-    image_list = [list(data.values())[0] for data in list_dict_final_images]
-    image_content = []
-
-    for index, image_bytes in enumerate(image_list):
-        with NamedTemporaryFile(suffix=".jpeg", delete=False) as temp_file:
-            temp_file.write(image_bytes)
-            temp_file_path = temp_file.name
-
-        loader = UnstructuredImageLoader(temp_file_path)
-        data = loader.load()
-        raw_text = data[0].page_content if data else ''
-        image_content.append(raw_text)
-
-        os.remove(temp_file_path)
-
-    return "\n".join(image_content)
-
-def extract_text_parallel(pdf_path, images, use_ocr=True):
-    """Extract text using multiple methods in parallel for speed"""
+    Args:
+        pdf_path (str): Path to the PDF file
+        images (list): List of PIL images from PDF pages
+        use_ocr (bool): Whether to use OCR for text extraction
+        fast_mode (bool): If True, use faster but less accurate settings
+        
+    Returns:
+        tuple: (results_dict, combined_text) Dictionary of results by method and combined text
+    """
     results = {}
     
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        # Always run PyPDF extraction
-        pdf_future = executor.submit(extract_text_with_pypdf, pdf_path)
-        
-        futures = []
-        
-        # Optionally run OCR methods
-        if use_ocr and import_ocr_libraries():
-            try:
-                # Start OCR tasks in parallel
-                tesseract_future = executor.submit(extract_text_with_pytesseract, images)
-                easyocr_future = executor.submit(extract_text_with_easyocr, images)
-                langchain_future = executor.submit(extract_text_with_langchain, pdf_path)
-                langchain_img_future = executor.submit(extract_text_with_langchain_image, images)
-                
-                futures = [tesseract_future, easyocr_future, langchain_future, langchain_img_future]
-            except Exception as e:
-                print(f"Error setting up OCR extraction: {e}")
-        
-        # Get results
-        results['pypdf'] = pdf_future.result()
-        
-        # Get OCR results if available
-        if futures:
-            try:
-                results['pytesseract'] = tesseract_future.result()
-                results['easyocr'] = easyocr_future.result()
-                results['langchain_pdf'] = langchain_future.result()
-                results['langchain_img'] = langchain_img_future.result()
-            except Exception as e:
-                print(f"Error in OCR processing: {e}")
+    # Extract text directly from PDF (usually faster and better when text is available)
+    pdf_text = extract_text_from_pdf(pdf_path)
+    results['pdf_direct'] = pdf_text
     
-    # Combine all available text
-    combined_text = " ".join(results.values())
+    # If OCR is requested and there are images, extract text with OCR
+    if use_ocr and images:
+        # For fast mode, process fewer images
+        if fast_mode and len(images) > 5:
+            # Take first, middle, and last pages for a representative sample
+            sample_indices = [0, len(images)//2, len(images)-1]
+            sample_images = [images[i] for i in sample_indices if i < len(images)]
+        else:
+            sample_images = images
+        
+        # Process images in parallel using thread pool
+        ocr_results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(extract_text_with_ocr, img, fast_mode): idx for idx, img in enumerate(sample_images)}
+            
+            for future in concurrent.futures.as_completed(futures):
+                idx = futures[future]
+                try:
+                    ocr_text = future.result()
+                    ocr_results.append(ocr_text)
+                except Exception as e:
+                    logger.error(f"Error processing image {idx}: {str(e)}")
+        
+        # Combine OCR results
+        results['ocr'] = "\n\n".join(ocr_results)
     
-    return results, combined_text
+    # Combine all text results, prioritizing PDF direct extraction if it has content
+    if pdf_text.strip() and len(pdf_text) > 100:
+        # If PDF direct extraction has reasonable content, use it as primary
+        combined_text = pdf_text
+    elif 'ocr' in results and results['ocr'].strip():
+        # Otherwise use OCR results if available
+        combined_text = results['ocr']
+    else:
+        # Fallback to whatever
