@@ -83,9 +83,6 @@ RUN python -m spacy download en_core_web_sm
 # Copy the models if they exist
 COPY models/ /models/
 
-# Configure Docker to use Google Container Registry
-RUN gcloud auth configure-docker
-
 # Expose port
 EXPOSE 8080
 
