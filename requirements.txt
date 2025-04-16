@@ -16,5 +16,4 @@ torch
 langchain
 langchain-community
 unstructured
-unstructured[pdf]
 python-multipart
